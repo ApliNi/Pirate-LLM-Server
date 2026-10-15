@@ -1,0 +1,176 @@
+name: Build Unsigned IPA
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      clean_cache:
+        description: 'Force clean build (skip cache and rebuild llama.xcframework)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-unsigned-ipa:
+    name: Build Unsigned IPA
+    runs-on: macos-14
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: System & Toolchain Information
+        run: |
+          echo "=== Operating System Information ==="
+          sw_vers
+          uname -a
+          echo ""
+          echo "=== Build Tools Information ==="
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphoneos --show-sdk-path
+          cmake --version | head -n 1
+          git --version
+          echo ""
+          echo "=== Available Xcode SDKs ==="
+          xcodebuild -showsdks
+
+      - name: Cache llama.cpp & XCFramework
+        id: cache-llama
+        if: ${{ !inputs.clean_cache }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            Vendor/llama.cpp
+            Packages/LlamaLocal/llama.xcframework
+          key: llama-xcframework-${{ runner.os }}-${{ hashFiles('build-llama.sh', 'setup.sh') }}
+          restore-keys: |
+            llama-xcframework-${{ runner.os }}-
+
+      - name: Cache Swift Package Manager
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: spm-${{ runner.os }}-${{ hashFiles('LLMServer.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
+      - name: Setup llama.xcframework
+        run: |
+          chmod +x setup.sh build-llama.sh
+          SETUP_FLAGS="--copy"
+          if [ "${{ inputs.clean_cache }}" = "true" ]; then
+            echo "Clean build requested; passing --clean to setup.sh"
+            SETUP_FLAGS="$SETUP_FLAGS --clean"
+          fi
+
+          echo "Executing setup.sh with flags: $SETUP_FLAGS"
+          ./setup.sh $SETUP_FLAGS
+
+          echo "Verifying Packages/LlamaLocal/llama.xcframework..."
+          if [ ! -f "Packages/LlamaLocal/llama.xcframework/Info.plist" ]; then
+            echo "Error: Packages/LlamaLocal/llama.xcframework/Info.plist missing" >&2
+            exit 1
+          fi
+
+          # Prune intermediate build folders to minimize cache archive footprint
+          rm -rf Vendor/llama.cpp/build-ios-device Vendor/llama.cpp/build-ios-sim
+          echo "Intermediate build artifacts cleared."
+
+      - name: Build Unsigned iOS App
+        run: |
+          echo "Starting xcodebuild Release build for generic iOS device..."
+          xcodebuild build \
+            -project LLMServer.xcodeproj \
+            -scheme LLMServer \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM=""
+
+          echo "xcodebuild completed successfully."
+
+      - name: Package Unsigned IPA
+        run: |
+          APP_PATH=$(find build -name "LLMServer.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "Error: LLMServer.app not found under build directory" >&2
+            find build -maxdepth 4 -print
+            exit 1
+          fi
+          echo "Found application bundle: $APP_PATH"
+
+          echo "Inspecting app bundle contents:"
+          ls -la "$APP_PATH"
+
+          if [ -d "$APP_PATH/Frameworks" ]; then
+            echo "Embedded frameworks:"
+            ls -la "$APP_PATH/Frameworks"
+          fi
+
+          if [ -f "$APP_PATH/Info.plist" ]; then
+            echo "Info.plist details:"
+            plutil -p "$APP_PATH/Info.plist" | head -n 25
+          fi
+
+          REPO_ROOT="$(pwd)"
+          STAGING_DIR="$REPO_ROOT/build/ipa_staging"
+          rm -rf "$STAGING_DIR" "$REPO_ROOT/LLMServer.ipa"
+          mkdir -p "$STAGING_DIR/Payload"
+
+          echo "Staging application for IPA packaging..."
+          cp -R "$APP_PATH" "$STAGING_DIR/Payload/"
+
+          echo "Creating unsigned IPA archive..."
+          (cd "$STAGING_DIR" && zip -r -y "$REPO_ROOT/LLMServer.ipa" Payload)
+          rm -rf "$STAGING_DIR"
+
+          if [ ! -f "$REPO_ROOT/LLMServer.ipa" ]; then
+            echo "Error: Failed to create $REPO_ROOT/LLMServer.ipa" >&2
+            exit 1
+          fi
+
+          echo "IPA archive created successfully:"
+          ls -lh "$REPO_ROOT/LLMServer.ipa"
+          shasum -a 256 "$REPO_ROOT/LLMServer.ipa"
+
+          echo "Inspecting IPA internal structure:"
+          unzip -l "$REPO_ROOT/LLMServer.ipa" | head -n 30
+
+      - name: Upload Unsigned IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LLMServer-unsigned-ipa
+          path: LLMServer.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: LLMServer.ipa
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -205,7 +205,6 @@ final class APIServer: @unchecked Sendable {
     }
 
     private func handleStreamingCompletion(prompt: String, params: LLMEngine.GenerationParams, model: String) -> ReadiumGCDWebServerResponse {
-        let responseReady = DispatchSemaphore(value: 0)
         var streamResponse: ReadiumGCDWebServerStreamedResponse?
 
         let tokenBuffer = TokenBuffer()
