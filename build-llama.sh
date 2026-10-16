@@ -86,15 +86,21 @@ create_dynamic_framework() {
 
     # Collect only the core static libs (exclude libcommon.a, libcpp-httplib.a, libbuild_info.a)
     local STATIC_LIBS=""
-    for lib in $(find ${BUILD_DIR} -name "*.a" -path "*/${PLATFORM}/*" | sort); do
+    local SEEN_BASENAMES=" "
+    for lib in $(find "${BUILD_DIR}" -name "*.a" -path "*/${PLATFORM}/*" ! -path "*.build/*" ! -path "*/Objects-normal/*" | sort); do
         local basename=$(basename "$lib")
         case "$basename" in
             libcommon.a|libcpp-httplib.a|libbuild_info.a)
                 echo "  Skipping $basename (not needed for inference)"
                 ;;
             *)
-                STATIC_LIBS="${STATIC_LIBS} ${lib}"
-                echo "  Including $basename"
+                if [[ "$SEEN_BASENAMES" == *" $basename "* ]]; then
+                    echo "  Skipping duplicate $basename ($lib)"
+                else
+                    SEEN_BASENAMES="${SEEN_BASENAMES}${basename} "
+                    STATIC_LIBS="${STATIC_LIBS} ${lib}"
+                    echo "  Including $basename"
+                fi
                 ;;
         esac
     done
@@ -183,15 +189,21 @@ mkdir -p "${SIM_FW_DIR}/Headers" "${SIM_FW_DIR}/Modules"
 
 # Collect sim static libs
 SIM_STATIC_LIBS=""
-for lib in $(find build-ios-sim -name "*.a" -path "*/Release-iphonesimulator/*" | sort); do
+SIM_SEEN_BASENAMES=" "
+for lib in $(find build-ios-sim -name "*.a" -path "*/Release-iphonesimulator/*" ! -path "*.build/*" ! -path "*/Objects-normal/*" | sort); do
     basename=$(basename "$lib")
     case "$basename" in
         libcommon.a|libcpp-httplib.a|libbuild_info.a)
             echo "  Skipping $basename (simulator)"
             ;;
         *)
-            SIM_STATIC_LIBS="${SIM_STATIC_LIBS} ${lib}"
-            echo "  Including $basename (simulator)"
+            if [[ "$SIM_SEEN_BASENAMES" == *" $basename "* ]]; then
+                echo "  Skipping duplicate $basename (simulator: $lib)"
+            else
+                SIM_SEEN_BASENAMES="${SIM_SEEN_BASENAMES}${basename} "
+                SIM_STATIC_LIBS="${SIM_STATIC_LIBS} ${lib}"
+                echo "  Including $basename (simulator)"
+            fi
             ;;
     esac
 done

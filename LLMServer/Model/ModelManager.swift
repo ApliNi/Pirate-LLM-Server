@@ -96,6 +96,8 @@ final class ModelManager: NSObject, ObservableObject, @unchecked Sendable {
     private var session: URLSession?
     private let targetFilenameLock = NSLock()
     private var _targetFilename: String?
+    private var lastDownloadTarget: (url: String, filename: String?)?
+    private var lastLogged100MBSlot: Int = 0
 
     var currentTargetFilename: String? {
         get {
